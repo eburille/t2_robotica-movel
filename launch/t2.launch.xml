@@ -1,0 +1,14 @@
+<launch>
+
+    <include file="$(find-pkg-share twil_bringup)/launch/gazebo.launch.xml">
+        <arg name="controller" value="twist_mrac_linearizing_controller"/>
+        <arg name="gps" value="true"/>
+        <arg name="imu" value="true"/>
+        <arg name="world" value="$(find-pkg-share ufrgs_gazebo)/worlds/empty_sky_porto_alegre.world"/>
+        <arg name="pause" value="false"/>
+        <arg name="config" value="$(find-pkg-share t2)/config/twist_mrac_linearizing_controller.yaml"/>
+
+    </include>
+
+    <node name="controlador" pkg="t2" exec="controlador"/>
+</launch>

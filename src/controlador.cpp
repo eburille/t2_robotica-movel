@@ -14,7 +14,7 @@ class Controlador: public rclcpp::Node{
   public:
     Controlador(void);
 
-    void pubVel(void);
+    void angVelPublisher(void);
   
   private:
     double x_odom = 0.0;
@@ -54,6 +54,28 @@ Controlador::Controlador(void): Node ("controlador"){
   satSub_ =create_subscription<sensor_msgs::msg::NavSatFix>("gnss/fix", 1, std::bind(&Controlador::satSubCB,this,_1));
 
   velPub_=create_publisher<geometry_msgs::msg::Twist>("/twist_mrac_linearizing_controller/command", 100);
+
+  int rate = 100;
+  timer_=rclcpp::create_timer(this, this->get_clock(), rclcpp::Duration::from_seconds(1.0/rate),std::bind(&Controlador::angVelPublisher,this));
+
+}
+
+void Controlador::angVelPublisher(void)
+{   
+    geometry_msgs::msg::Twist msg;
+
+    geometry_msgs::msg::Vector3 lin;
+    geometry_msgs::msg::Vector3 ang;
+  
+    msg.linear = lin;
+    msg.angular = ang;
+
+    RCLCPP_INFO(this->get_logger(), "\n Dados coletados");
+
+    
+
+    RCLCPP_INFO(this->get_logger(), " x_odom  | x_gps     -      y_odom  | y_gps     -    Theta_odom   | Theta_IMU ");
+    RCLCPP_INFO(this->get_logger(), "  %.4f       %.4f            %.4f     %.4f             %.4f             %.4f", x_odom , x_gps, y_odom , y_gps, theta_odom, theta_imu);
 }
 
 void Controlador::odomSubCB(const nav_msgs::msg::Odometry::SharedPtr odomSub)
@@ -150,19 +172,6 @@ void Controlador::satSubCB(const sensor_msgs::msg::NavSatFix::SharedPtr satSub){
     } catch (const std::exception& e) {
         RCLCPP_ERROR(this->get_logger(), "Erro na conversão: %s", e.what());
     }
-}
-
-
-void Controlador::pubVel(){
-
-  geometry_msgs::msg::Twist msg;
-
-  geometry_msgs::msg::Vector3 lin;
-  geometry_msgs::msg::Vector3 ang;
-  
-  msg.linear = lin;
-  msg.angular = ang;
-
 }
 
 int main(int argc, char ** argv)

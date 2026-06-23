@@ -11,4 +11,7 @@
     </include>
 
     <node name="controlador" pkg="t2" exec="controlador"/>
+
+    <node name="odometry_publisher" pkg="arc_odometry" exec="odometry_publisher" args="--ros-args --params-file $(find-pkg-share t1)/config/odometry_config.yaml" />
+    
 </launch>

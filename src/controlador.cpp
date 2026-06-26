@@ -37,15 +37,21 @@ class Controlador: public rclcpp::Node{
 
     double dt;
     int rate;
+    
+    // Vetor dos sensores [x_odom, y_odom, theta_odom, vel_odom, theta_imu, ax_imu, ay_imu, x_gps, y_gps]
+    Eigen::VectorXd Y = Eigen::VectorXd::Zero(9);
 
-    // Vetor de estados: [X, Y, vel_lin, theta, vel_ang]
-    Eigen::VectorXd state = Eigen::VectorXd::Zero(5);
+    // Vetor de estados: [X, Y, theta, vel_lin]
+    Eigen::VectorXd state = Eigen::VectorXd::Zero(4);
+
+    // Entrada do sistema: [w a]
+    Eigen::VectorXd u = Eigen::VectorXd::Zero(2);
 
     // Matriz de Covariância do Erro (Incerteza do estado
-    Eigen::MatrixXd P = Eigen::MatrixXd::Identity(5, 5) * 1.0; // Incerteza inicial
+    Eigen::MatrixXd P = Eigen::MatrixXd::Identity(4, 4) * 1.0; // Incerteza inicial
         
     // Configuração de ruído do processo (Ajustar baseado no robô)
-    Eigen::MatrixXd Q = Eigen::MatrixXd::Zero(5, 5);
+    Eigen::MatrixXd Q = Eigen::MatrixXd::Zero(4, 4);
 
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr velPub_;
 
@@ -94,9 +100,14 @@ void Controlador::angVelPublisher(void)
     msg.linear = lin;
     msg.angular = ang;
 
+    RCLCPP_INFO(this->get_logger(), "AQUI PORRA");
+
     Controlador::predictKalmanState();
 
-    // RCLCPP_INFO(this->get_logger(), "Dados coletados");
+    RCLCPP_INFO(this->get_logger(), "Dados coletados");
+    RCLCPP_INFO(this->get_logger(), "x    y   ang   vel");
+    RCLCPP_INFO(this->get_logger(), "%.4f  %.4f   %.4f   %.4f\n", state(0) , state(1), state(2) , state(3));
+
     // RCLCPP_INFO(this->get_logger(), "x_odom | x_gps  -  y_odom | y_gps  -  ang_odom | ang_IMU ");
     // RCLCPP_INFO(this->get_logger(), "%.4f  %.4f   %.4f  %.4f    %.4f   %.4f\n", x_odom , x_gps, y_odom , y_gps, theta_odom, theta_imu);
 
@@ -105,36 +116,96 @@ void Controlador::angVelPublisher(void)
 }
 
 void Controlador::predictKalmanState(){
-  double theta = state(2);
-  double v = state(3);
-  double omega = state(4);
+  static Eigen::VectorXd state_1 = Eigen::VectorXd::Zero(4);
 
-  // Atualiza o estado usando o modelo não-linear f(x)
-  state(0) += v * std::cos(theta) * dt;
-  state(1) += v * std::sin(theta) * dt;
-  state(2) += omega * dt;
-  // v e omega mantêm-se constantes na predição pura (modelo de velocidade constante)
+  static Eigen::VectorXd K = Eigen::VectorXd::Zero(4, 9);
+  static Eigen::VectorXd P = Eigen::VectorXd::Identity(4, 4)*1000;
+  static Eigen::VectorXd P_1 = Eigen::VectorXd::Identity(4, 4)*1000;
 
-  // Normaliza theta entre -PI e +PI
-  state(2) = std::atan2(std::sin(state(2)), std::cos(state(2)));
+  static Eigen::VectorXd f = Eigen::VectorXd::Zero(4);
+  static Eigen::VectorXd F = Eigen::VectorXd::Identity(4, 4);
 
-  // Calcula a matriz Jacobiana A baseada no estado atual
-  Eigen::MatrixXd A = Eigen::MatrixXd::Identity(5, 5);
-  A(0, 2) = -v * std::sin(theta) * dt;
-  A(0, 3) = std::cos(theta) * dt;
-  A(1, 2) = v * std::cos(theta) * dt;
-  A(1, 3) = std::sin(theta) * dt;
-  A(2, 4) = dt;
+  static Eigen::VectorXd h = Eigen::VectorXd::Zero(9);
+  static Eigen::VectorXd H = Eigen::VectorXd::Zero(9, 4);
 
-  // Atualiza a covariância: P = A*P*A^T + Q
-  P = A * P * A.transpose() + Q;
+  double x         = state(0);
+  double y         = state(1);
+  double theta     = state(2);
+  double vel_lin   = state(3);
+
+  double w         = u(0);
+  double a         = u(1);
+
+  f(0) = x + cos(theta) * vel_lin * dt;
+  f(1) = y + sin(theta) * vel_lin * dt;
+  f(2) = theta + w * dt;
+  f(3) = vel_lin + a * dt;
+
+  F(2,0) = -sin(theta) * vel_lin * dt;
+  F(3,0) =  cos(theta) * vel_lin * dt;
+  F(2,1) =  cos(theta) * vel_lin * dt;
+  F(3,1) =  sin(theta) * vel_lin * dt;
+
+  h(0) = x;
+  h(1) = y;
+  h(2) = theta;
+  h(3) = vel_lin;
+  h(4) = theta;
+  h(5) = cos(theta) * a;
+  h(6) = sin(theta) * a;
+  h(7) = x;
+  h(8) = y;
+
+  H(0,0) = 1;
+  H(1,1) = 1;
+  H(2,2) = 1;
+  H(3,3) = 1;
+  H(4,2) = 1;
+  H(7,0) = 1;
+  H(8,1) = 1;
+  H(5,2) = -sin(theta) * a;
+  H(6,2) =  cos(theta) * a;
+  
+
+  K = P * H.transpose() + (H * P * H.transpose() ).inverse();
+
+  state = state_1 + K * (Y - h);
+
+  P = (Eigen::VectorXd::Identity(4, 4) - K * H) * P;
+
+  state_1 = f;
+
+  P = F * P * F.transpose();
+  // double theta = state(2);
+  // double v = state(3);
+  // double omega = state(4);
+
+  // // Atualiza o estado usando o modelo não-linear f(x)
+  // state(0) += v * std::cos(theta) * dt;
+  // state(1) += v * std::sin(theta) * dt;
+  // state(2) += omega * dt;
+  // // v e omega mantêm-se constantes na predição pura (modelo de velocidade constante)
+
+  // // Normaliza theta entre -PI e +PI
+  // state(2) = std::atan2(std::sin(state(2)), std::cos(state(2)));
+
+  // // Calcula a matriz Jacobiana A baseada no estado atual
+  // Eigen::MatrixXd A = Eigen::MatrixXd::Identity(5, 5);
+  // A(0, 2) = -v * std::sin(theta) * dt;
+  // A(0, 3) = std::cos(theta) * dt;
+  // A(1, 2) = v * std::cos(theta) * dt;
+  // A(1, 3) = std::sin(theta) * dt;
+  // A(2, 4) = dt;
+
+  // // Atualiza a covariância: P = A*P*A^T + Q
+  // P = A * P * A.transpose() + Q;
 }
 
 void Controlador::odomSubCB(const nav_msgs::msg::Odometry::SharedPtr odomSub)
-{
-    x_odom = odomSub->pose.pose.position.x;
-    y_odom = odomSub->pose.pose.position.y;
-
+{ 
+  //[x_odom, y_odom, theta_odom, vel_odom, theta_imu, ax_imu, ay_imu, x_gps, y_gps]
+    // x_odom = odomSub->pose.pose.position.x;
+    // y_odom = odomSub->pose.pose.position.y;
     double y_orientation =  odomSub->pose.pose.orientation.y;
     double x_orientation =  odomSub->pose.pose.orientation.x;
 
@@ -142,12 +213,17 @@ void Controlador::odomSubCB(const nav_msgs::msg::Odometry::SharedPtr odomSub)
     double w_orientation = odomSub->pose.pose.orientation.w;
     
     double yaw = atan2(2 * (w_orientation * z_orientation + x_orientation * y_orientation), 1 - 2 * (y_orientation*y_orientation + z_orientation*z_orientation));
-    theta_odom = yaw;
+    double theta_odom = yaw;
 
-    vel_x_odom = odomSub->twist.twist.linear.x; 
-    vel_y_odom = odomSub->twist.twist.linear.x; 
+    double vel_x_odom = odomSub->twist.twist.linear.x; 
+    double vel_y_odom = odomSub->twist.twist.linear.x; 
 
-    vel_lin_odom = std::sqrt(vel_x_odom*vel_x_odom + vel_y_odom*vel_y_odom);
+    double vel_lin_odom = std::sqrt(vel_x_odom*vel_x_odom + vel_y_odom*vel_y_odom);
+
+    Y(0) = odomSub->pose.pose.position.x;
+    Y(1) = odomSub->pose.pose.position.y;
+    Y(2) = yaw;
+    Y(3) = vel_lin_odom;
 
     // RCLCPP_INFO(this->get_logger(), "Odometria recebida");
     // RCLCPP_INFO(this->get_logger(), "--- Posição Atual do Robô (Odom) ---");
@@ -162,6 +238,7 @@ void Controlador::odomSubCB(const nav_msgs::msg::Odometry::SharedPtr odomSub)
 }
 
 void Controlador::imuSubCB(const sensor_msgs::msg::Imu::SharedPtr imuSub){
+  //[x_odom, y_odom, theta_odom, vel_odom, theta_imu, ax_imu, ay_imu, x_gps, y_gps]
   double z_orientation =  imuSub->orientation.z;
   double w_orientation =  imuSub->orientation.w;
 
@@ -169,19 +246,20 @@ void Controlador::imuSubCB(const sensor_msgs::msg::Imu::SharedPtr imuSub){
   double x_orientation =  imuSub->orientation.x;
 
   double yaw = atan2(2 * (w_orientation * z_orientation + x_orientation * y_orientation), 1 - 2 * (y_orientation*y_orientation + z_orientation*z_orientation));
-  theta_imu = yaw + M_PI_2;
+  double theta_imu = yaw + M_PI_2;
 
   if (theta_imu > M_PI){
     theta_imu -= 2*M_PI;
   }
 
-  ang_vel_imu = imuSub->angular_velocity.z;
+  Y(4) = theta_imu;
+  Y(5) = imuSub->linear_acceleration.x;
+  Y(6) = imuSub->linear_acceleration.y;
 
-  accel_x_imu = imuSub->linear_acceleration.x;
-  accel_y_imu = imuSub->linear_acceleration.y;
 }
 
 void Controlador::satSubCB(const sensor_msgs::msg::NavSatFix::SharedPtr satSub){
+  //[x_odom, y_odom, theta_odom, vel_odom, theta_imu, ax_imu, ay_imu, x_gps, y_gps]
   // Ignora se o GPS não tiver sinal válido
   if (satSub->status.status == sensor_msgs::msg::NavSatStatus::STATUS_NO_FIX) {
       RCLCPP_WARN(this->get_logger(), "Aguardando sinal válido de GPS...");
@@ -209,8 +287,11 @@ void Controlador::satSubCB(const sensor_msgs::msg::NavSatFix::SharedPtr satSub){
     }
 
     // Calcula a posição cartesiana local relativa à origem (0,0)
-    x_gps = -(utm_x - origin_x_);
-    y_gps = utm_y - origin_y_;
+    double x_gps = -(utm_x - origin_x_);
+    double y_gps = utm_y - origin_y_;
+
+    Y(7) = x_gps;
+    Y(8) = y_gps;
 
     } catch (const std::exception& e) {
         RCLCPP_ERROR(this->get_logger(), "Erro na conversão: %s", e.what());

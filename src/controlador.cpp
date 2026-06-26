@@ -17,7 +17,7 @@ class Controlador: public rclcpp::Node{
   public:
     Controlador(void);
 
-    void angVelPublisher(void);
+    void posePublisher(void);
   
   private:
     double x_odom = 0.0;
@@ -38,23 +38,21 @@ class Controlador: public rclcpp::Node{
     double dt;
     int rate;
     
+    int num_estados = 3;
+    int num_sensores = 7;
+
     // Vetor dos sensores [x_odom, y_odom, theta_odom, vel_odom, theta_imu, ax_imu, ay_imu, x_gps, y_gps]
-    Eigen::VectorXd Y = Eigen::VectorXd::Zero(9);
+    Eigen::VectorXd Y = Eigen::VectorXd::Zero(num_sensores);
 
     // Vetor de estados: [X, Y, theta, vel_lin]
-    Eigen::VectorXd state = Eigen::VectorXd::Zero(4);
+    Eigen::VectorXd state = Eigen::VectorXd::Zero(num_estados);
 
     // Entrada do sistema: [w a]
     Eigen::VectorXd u = Eigen::VectorXd::Zero(2);
-
-    // Matriz de Covariância do Erro (Incerteza do estado
-    Eigen::MatrixXd P = Eigen::MatrixXd::Identity(4, 4) * 1.0; // Incerteza inicial
         
-    // Configuração de ruído do processo (Ajustar baseado no robô)
-    Eigen::MatrixXd Q = Eigen::MatrixXd::Zero(4, 4);
-
-    rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr velPub_;
-
+    rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr posePub_;
+    
+    rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr velSub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odomSub_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imuSub_;
     rclcpp::Subscription<sensor_msgs::msg::NavSatFix>::SharedPtr satSub_;
@@ -64,6 +62,7 @@ class Controlador: public rclcpp::Node{
     void odomSubCB(const nav_msgs::msg::Odometry::SharedPtr odomSub);
     void imuSubCB(const sensor_msgs::msg::Imu::SharedPtr imuSub);
     void satSubCB(const sensor_msgs::msg::NavSatFix::SharedPtr satSub);
+    void velSubCB(const geometry_msgs::msg::Twist velSub);
 
     void predictKalmanState();
 };
@@ -72,38 +71,44 @@ Controlador::Controlador(void): Node ("controlador"){
   rate = 100;
   dt = 1/rate;
 
-  Q(0,0) = 0.0001; // Ruído de posição X
-  Q(1,1) = 0.0001; // Ruído de posição Y
-  Q(2,2) = 0.0001; // Ruído de ângulo
-  Q(3,3) = 0.0001;  // Ruído de velocidade linear
-
   using std::placeholders::_1;
 
   odomSub_=create_subscription<nav_msgs::msg::Odometry>("odom", 1, std::bind(&Controlador::odomSubCB,this,_1));
   imuSub_ =create_subscription<sensor_msgs::msg::Imu>("imu/data", 1, std::bind(&Controlador::imuSubCB,this,_1));
   satSub_ =create_subscription<sensor_msgs::msg::NavSatFix>("gnss/fix", 1, std::bind(&Controlador::satSubCB,this,_1));
+  velSub_=create_subscription<geometry_msgs::msg::Twist>("/twist_mrac_linearizing_controller/command", 1, std::bind(&Controlador::velSubCB,this,_1));
 
-  velPub_=create_publisher<geometry_msgs::msg::Twist>("/twist_mrac_linearizing_controller/command", 100);
+  posePub_=create_publisher<nav_msgs::msg::Odometry>("/pose_ekf", 100);
 
-  timer_=rclcpp::create_timer(this, this->get_clock(), rclcpp::Duration::from_seconds(1.0/rate),std::bind(&Controlador::angVelPublisher,this));
+  timer_=rclcpp::create_timer(this, this->get_clock(), rclcpp::Duration::from_seconds(1.0/rate),std::bind(&Controlador::posePublisher,this));
 
 }
 
-void Controlador::angVelPublisher(void)
+void Controlador::posePublisher(void)
 {   
-    geometry_msgs::msg::Twist msg;
-
-    geometry_msgs::msg::Vector3 lin;
-    geometry_msgs::msg::Vector3 ang;
-  
-    msg.linear = lin;
-    msg.angular = ang;
+    nav_msgs::msg::Odometry msg;
 
     Controlador::predictKalmanState();
 
-    RCLCPP_INFO(this->get_logger(), "Dados coletados");
-    RCLCPP_INFO(this->get_logger(), "x    y   ang   vel");
-    RCLCPP_INFO(this->get_logger(), "%.4f  %.4f   %.4f   %.4f\n", state(0) , state(1), state(2) , state(3));
+    // RCLCPP_INFO(this->get_logger(), "Dados coletados");
+    // RCLCPP_INFO(this->get_logger(), "x    y   ang  ");
+    // RCLCPP_INFO(this->get_logger(), "%.4f  %.4f  %.4f\n", state(0) , state(1), state(2));
+
+    Eigen::AngleAxisd rotation_vector(state(2), Eigen::Vector3d::UnitZ());
+
+    Eigen::Quaterniond q(rotation_vector);
+
+    // 2. Garante que o quaternion está normalizado (evita erros numéricos)
+    q.normalize();
+
+    msg.pose.pose.position.x = state(0);
+    msg.pose.pose.position.y = state(1);
+    msg.pose.pose.orientation.x = q.x();
+    msg.pose.pose.orientation.y = q.y();
+    msg.pose.pose.orientation.z = q.z();
+    msg.pose.pose.orientation.w = q.w();
+
+    posePub_->publish(msg);
 
     // RCLCPP_INFO(this->get_logger(), "x_odom | x_gps  -  y_odom | y_gps  -  ang_odom | ang_IMU ");
     // RCLCPP_INFO(this->get_logger(), "%.4f  %.4f   %.4f  %.4f    %.4f   %.4f\n", x_odom , x_gps, y_odom , y_gps, theta_odom, theta_imu);
@@ -113,88 +118,87 @@ void Controlador::angVelPublisher(void)
 }
 
 void Controlador::predictKalmanState(){
-  static Eigen::VectorXd state_1 = Eigen::VectorXd::Zero(4);
+  printf("controlador \n");
+  static Eigen::VectorXd state_1 = Eigen::VectorXd::Zero(num_estados);
 
-  static Eigen::MatrixXd K = Eigen::MatrixXd::Zero(4, 9);
-  static Eigen::MatrixXd P = Eigen::MatrixXd::Identity(4, 4)*1000;
-  static Eigen::MatrixXd P_1 = Eigen::MatrixXd::Identity(4, 4)*1000;
+  static Eigen::MatrixXd K = Eigen::MatrixXd::Zero(num_estados, num_sensores);
+  static Eigen::MatrixXd P = Eigen::MatrixXd::Identity(num_estados, num_estados)*1000;
+  static Eigen::MatrixXd P_1 = Eigen::MatrixXd::Identity(num_estados, num_estados)*1000;
 
-  static Eigen::VectorXd f = Eigen::VectorXd::Zero(4);
-  static Eigen::MatrixXd F = Eigen::MatrixXd::Identity(4, 4);
+  static Eigen::VectorXd f = Eigen::VectorXd::Zero(num_estados);
+  static Eigen::MatrixXd F = Eigen::MatrixXd::Identity(num_estados, num_estados);
 
-  static Eigen::VectorXd h = Eigen::VectorXd::Zero(9);
-  static Eigen::MatrixXd H = Eigen::MatrixXd::Zero(9, 4);
+  static Eigen::VectorXd h = Eigen::VectorXd::Zero(num_sensores);
+  static Eigen::MatrixXd H = Eigen::MatrixXd::Zero(num_sensores, num_estados);
+
+  // Configuração de ruído do processo (Ajustar baseado no robô)
+  Eigen::MatrixXd Q = Eigen::MatrixXd::Zero(num_estados, num_estados);
+  Eigen::MatrixXd R = Eigen::MatrixXd::Zero(num_sensores, num_sensores);
+
 
   double x         = state(0);
   double y         = state(1);
   double theta     = state(2);
-  double vel_lin   = state(3);
 
   double w         = u(0);
-  double a         = u(1);
+  double vel_lin   = u(1);
 
   f(0) = x + cos(theta) * vel_lin * dt;
   f(1) = y + sin(theta) * vel_lin * dt;
   f(2) = theta + w * dt;
-  f(3) = vel_lin + a * dt;
 
   F(2,0) = -sin(theta) * vel_lin * dt;
-  F(3,0) =  cos(theta) * vel_lin * dt;
   F(2,1) =  cos(theta) * vel_lin * dt;
-  F(3,1) =  sin(theta) * vel_lin * dt;
 
   h(0) = x;
   h(1) = y;
   h(2) = theta;
   h(3) = vel_lin;
   h(4) = theta;
-  h(5) = cos(theta) * a;
-  h(6) = sin(theta) * a;
-  h(7) = x;
-  h(8) = y;
+  h(5) = x;
+  h(6) = y;
 
   H(0,0) = 1;
   H(1,1) = 1;
   H(2,2) = 1;
-  H(3,3) = 1;
   H(4,2) = 1;
-  H(7,0) = 1;
-  H(8,1) = 1;
-  H(5,2) = -sin(theta) * a;
-  H(6,2) =  cos(theta) * a;
+  H(5,0) = 1;
+  H(6,1) = 1;
+
+  Q(0,0) = 0.000001;              // Ruído de posição X
+  Q(1,1) = 0.01;              // Ruído de posição Y
+  Q(2,2) = 0.01;              // Ruído de ângulo
+
+  R(0,0) = 1.0;               // Ruido x_odom
+  R(1,1) = 1.0;               // Ruido y_odom
+  R(2,2) = 1.0;               // Ruido theta_odom  
+  R(4,4) = 0.0001;               // Ruido v_odom
+  R(3,3) = 1*M_PI/180;        // Ruido theta_imu
+  R(5,5) = 0.0001;               // Ruido x_gps
+  R(6,6) = 0.01;               // Ruido y_gps
   
-  K = P * H.transpose() * (H * P * H.transpose() + 0.01 * Eigen::MatrixXd::Identity(9, 9)).inverse();
 
-  state = state_1 + K * (Y - h);
-
-  P = (Eigen::MatrixXd::Identity(4, 4) - K * H) * P;
+  // printf("inicialização\n");
+  // std::cout << "Matriz f:\n" << f << std::endl;
+  // std::cout << "Matriz F:\n" << F << std::endl;
+  // std::cout << "Matriz h:\n" << h << std::endl;
+  // std::cout << "Matriz H:\n" << H << std::endl;
 
   state_1 = f;
-
   P = F * P * F.transpose() + Q;
-  // double theta = state(2);
-  // double v = state(3);
-  // double omega = state(4);
 
-  // // Atualiza o estado usando o modelo não-linear f(x)
-  // state(0) += v * std::cos(theta) * dt;
-  // state(1) += v * std::sin(theta) * dt;
-  // state(2) += omega * dt;
-  // // v e omega mantêm-se constantes na predição pura (modelo de velocidade constante)
+  K = P * H.transpose() * (H * P * H.transpose() + R).inverse();
+  state = state_1 + K * (Y - h);
+  P = (Eigen::MatrixXd::Identity(3, 3) - K * H) * P;
 
-  // // Normaliza theta entre -PI e +PI
-  // state(2) = std::atan2(std::sin(state(2)), std::cos(state(2)));
+}
 
-  // // Calcula a matriz Jacobiana A baseada no estado atual
-  // Eigen::MatrixXd A = Eigen::MatrixXd::Identity(5, 5);
-  // A(0, 2) = -v * std::sin(theta) * dt;
-  // A(0, 3) = std::cos(theta) * dt;
-  // A(1, 2) = v * std::cos(theta) * dt;
-  // A(1, 3) = std::sin(theta) * dt;
-  // A(2, 4) = dt;
+void Controlador::velSubCB(const geometry_msgs::msg::Twist velSub){  
+  u[0] = velSub.angular.z;
+  u[1] = velSub.linear.x;
 
-  // // Atualiza a covariância: P = A*P*A^T + Q
-  // P = A * P * A.transpose() + Q;
+  RCLCPP_INFO(this->get_logger(), "      vel recebida    ");
+  RCLCPP_INFO(this->get_logger(), "lin: %.4f     ang: %f", u[1], u[0]);
 }
 
 void Controlador::odomSubCB(const nav_msgs::msg::Odometry::SharedPtr odomSub)
@@ -204,12 +208,10 @@ void Controlador::odomSubCB(const nav_msgs::msg::Odometry::SharedPtr odomSub)
     // y_odom = odomSub->pose.pose.position.y;
     double y_orientation =  odomSub->pose.pose.orientation.y;
     double x_orientation =  odomSub->pose.pose.orientation.x;
-
     double z_orientation = odomSub->pose.pose.orientation.z;
     double w_orientation = odomSub->pose.pose.orientation.w;
     
     double yaw = atan2(2 * (w_orientation * z_orientation + x_orientation * y_orientation), 1 - 2 * (y_orientation*y_orientation + z_orientation*z_orientation));
-    double theta_odom = yaw;
 
     double vel_x_odom = odomSub->twist.twist.linear.x; 
     double vel_y_odom = odomSub->twist.twist.linear.x; 
@@ -249,9 +251,6 @@ void Controlador::imuSubCB(const sensor_msgs::msg::Imu::SharedPtr imuSub){
   }
 
   Y(4) = theta_imu;
-  Y(5) = imuSub->linear_acceleration.x;
-  Y(6) = imuSub->linear_acceleration.y;
-
 }
 
 void Controlador::satSubCB(const sensor_msgs::msg::NavSatFix::SharedPtr satSub){
@@ -286,8 +285,8 @@ void Controlador::satSubCB(const sensor_msgs::msg::NavSatFix::SharedPtr satSub){
     double x_gps = -(utm_x - origin_x_);
     double y_gps = utm_y - origin_y_;
 
-    Y(7) = x_gps;
-    Y(8) = y_gps;
+    Y(5) = x_gps;
+    Y(6) = y_gps;
 
     } catch (const std::exception& e) {
         RCLCPP_ERROR(this->get_logger(), "Erro na conversão: %s", e.what());

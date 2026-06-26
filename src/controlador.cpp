@@ -72,11 +72,10 @@ Controlador::Controlador(void): Node ("controlador"){
   rate = 100;
   dt = 1/rate;
 
-  Q(0,0) = 0.01; // Ruído de posição X
-  Q(1,1) = 0.01; // Ruído de posição Y
-  Q(2,2) = 0.02; // Ruído de ângulo
-  Q(3,3) = 0.1;  // Ruído de velocidade linear
-  Q(4,4) = 0.1;  // Ruído de velocidade angular
+  Q(0,0) = 0.0001; // Ruído de posição X
+  Q(1,1) = 0.0001; // Ruído de posição Y
+  Q(2,2) = 0.0001; // Ruído de ângulo
+  Q(3,3) = 0.0001;  // Ruído de velocidade linear
 
   using std::placeholders::_1;
 
@@ -100,8 +99,6 @@ void Controlador::angVelPublisher(void)
     msg.linear = lin;
     msg.angular = ang;
 
-    RCLCPP_INFO(this->get_logger(), "AQUI PORRA");
-
     Controlador::predictKalmanState();
 
     RCLCPP_INFO(this->get_logger(), "Dados coletados");
@@ -118,15 +115,15 @@ void Controlador::angVelPublisher(void)
 void Controlador::predictKalmanState(){
   static Eigen::VectorXd state_1 = Eigen::VectorXd::Zero(4);
 
-  static Eigen::VectorXd K = Eigen::VectorXd::Zero(4, 9);
-  static Eigen::VectorXd P = Eigen::VectorXd::Identity(4, 4)*1000;
-  static Eigen::VectorXd P_1 = Eigen::VectorXd::Identity(4, 4)*1000;
+  static Eigen::MatrixXd K = Eigen::MatrixXd::Zero(4, 9);
+  static Eigen::MatrixXd P = Eigen::MatrixXd::Identity(4, 4)*1000;
+  static Eigen::MatrixXd P_1 = Eigen::MatrixXd::Identity(4, 4)*1000;
 
   static Eigen::VectorXd f = Eigen::VectorXd::Zero(4);
-  static Eigen::VectorXd F = Eigen::VectorXd::Identity(4, 4);
+  static Eigen::MatrixXd F = Eigen::MatrixXd::Identity(4, 4);
 
   static Eigen::VectorXd h = Eigen::VectorXd::Zero(9);
-  static Eigen::VectorXd H = Eigen::VectorXd::Zero(9, 4);
+  static Eigen::MatrixXd H = Eigen::MatrixXd::Zero(9, 4);
 
   double x         = state(0);
   double y         = state(1);
@@ -166,16 +163,15 @@ void Controlador::predictKalmanState(){
   H(5,2) = -sin(theta) * a;
   H(6,2) =  cos(theta) * a;
   
-
-  K = P * H.transpose() + (H * P * H.transpose() ).inverse();
+  K = P * H.transpose() * (H * P * H.transpose() + 0.01 * Eigen::MatrixXd::Identity(9, 9)).inverse();
 
   state = state_1 + K * (Y - h);
 
-  P = (Eigen::VectorXd::Identity(4, 4) - K * H) * P;
+  P = (Eigen::MatrixXd::Identity(4, 4) - K * H) * P;
 
   state_1 = f;
 
-  P = F * P * F.transpose();
+  P = F * P * F.transpose() + Q;
   // double theta = state(2);
   // double v = state(3);
   // double omega = state(4);

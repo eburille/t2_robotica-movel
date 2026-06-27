@@ -13,7 +13,20 @@
 #include <sensor_msgs/msg/nav_sat_fix.hpp>
 #include <GeographicLib/UTMUPS.hpp>
 
+double lowPassFilter(double dt, double in, double oldIn, double oldOut){
+  double p = 50 * 2 * M_PI;  // polo
+
+  double a0 = (p*dt - 2) / (2 + p*dt);
+  double b0 = 2 / (2 + p*dt);
+  double b1 = - 2 / (2 + p*dt);
+
+  double out = -a0 * oldOut + b0 * in + b1 * oldIn;
+
+  return out;
+}
+
 class Controlador: public rclcpp::Node{
+  
   public:
     Controlador(void);
 
@@ -39,7 +52,9 @@ class Controlador: public rclcpp::Node{
     int rate;
     
     int num_estados = 3;
-    int num_sensores = 7;
+    int num_sensores = 5;
+
+
 
     // Vetor dos sensores [x_odom, y_odom, theta_odom, vel_odom, theta_imu, ax_imu, ay_imu, x_gps, y_gps]
     Eigen::VectorXd Y = Eigen::VectorXd::Zero(num_sensores);
@@ -70,6 +85,9 @@ class Controlador: public rclcpp::Node{
 Controlador::Controlador(void): Node ("controlador"){
   rate = 100;
   dt = 1/rate;
+
+  this->declare_parameter<std::vector<double>>("process_noise_diagonal", {1e-8, 0.01, 0.01});
+  this->declare_parameter<std::vector<double>>("measurement_noise_diagonal", {0.001, 1e-7, 0.0024, 1.5e-5, 1.5e-5});
 
   using std::placeholders::_1;
 
@@ -118,7 +136,10 @@ void Controlador::posePublisher(void)
 }
 
 void Controlador::predictKalmanState(){
-  printf("controlador \n");
+  static auto q_diag = this->get_parameter("process_noise_diagonal").as_double_array();
+  static auto r_diag = this->get_parameter("measurement_noise_diagonal").as_double_array();
+
+  // printf("controlador \n");
   static Eigen::VectorXd state_1 = Eigen::VectorXd::Zero(num_estados);
 
   static Eigen::MatrixXd K = Eigen::MatrixXd::Zero(num_estados, num_sensores);
@@ -132,8 +153,8 @@ void Controlador::predictKalmanState(){
   static Eigen::MatrixXd H = Eigen::MatrixXd::Zero(num_sensores, num_estados);
 
   // Configuração de ruído do processo (Ajustar baseado no robô)
-  Eigen::MatrixXd Q = Eigen::MatrixXd::Zero(num_estados, num_estados);
-  Eigen::MatrixXd R = Eigen::MatrixXd::Zero(num_sensores, num_sensores);
+  static Eigen::MatrixXd Q = Eigen::MatrixXd::Zero(num_estados, num_estados);
+  static Eigen::MatrixXd R = Eigen::MatrixXd::Zero(num_sensores, num_sensores);
 
 
   double x         = state(0);
@@ -150,32 +171,34 @@ void Controlador::predictKalmanState(){
   F(2,0) = -sin(theta) * vel_lin * dt;
   F(2,1) =  cos(theta) * vel_lin * dt;
 
-  h(0) = x;
-  h(1) = y;
-  h(2) = theta;
-  h(3) = vel_lin;
-  h(4) = theta;
-  h(5) = x;
-  h(6) = y;
+  h(0) = w;
+  h(1) = vel_lin;
+  h(2) = w;
+  h(3) = x;
+  h(4) = y;
 
-  H(0,0) = 1;
-  H(1,1) = 1;
-  H(2,2) = 1;
-  H(4,2) = 1;
-  H(5,0) = 1;
-  H(6,1) = 1;
+  H(3,0) = 1;
+  H(4,1) = 1;
 
-  Q(0,0) = 0.000001;              // Ruído de posição X
-  Q(1,1) = 0.01;              // Ruído de posição Y
-  Q(2,2) = 0.01;              // Ruído de ângulo
+  Q(0,0) = q_diag[0];
+  Q(1,1) = q_diag[1];
+  Q(2,2) = q_diag[2];
 
-  R(0,0) = 1.0;               // Ruido x_odom
-  R(1,1) = 1.0;               // Ruido y_odom
-  R(2,2) = 1.0;               // Ruido theta_odom  
-  R(4,4) = 0.0001;               // Ruido v_odom
-  R(3,3) = 1*M_PI/180;        // Ruido theta_imu
-  R(5,5) = 0.0001;               // Ruido x_gps
-  R(6,6) = 0.01;               // Ruido y_gps
+  R(0,0) = r_diag[0];
+  R(1,1) = r_diag[1];
+  R(2,2) = r_diag[2];
+  R(3,3) = r_diag[3];
+  R(4,4) = r_diag[4];
+
+  // Q(0,0) = 0.0000000001 ;                     // Ruído de posição X
+  // Q(1,1) = 0.01;                              // Ruído de posição Y
+  // Q(2,2) = 0.01;                              // Ruído de ângulo
+
+  // R(0,0) = 0.001;                             // Ruido w_odom
+  // R(1,1) = 0.0000001;                         // Ruido v_odom
+  // R(2,2) = 0.014*M_PI/180*sqrt(100);          // Ruido w_imu  
+  // R(3,3) = 1.5e-5;                            // Ruido x_gps
+  // R(4,4) = 1.5e-5;                            // Ruido y_gps
   
 
   // printf("inicialização\n");
@@ -183,6 +206,8 @@ void Controlador::predictKalmanState(){
   // std::cout << "Matriz F:\n" << F << std::endl;
   // std::cout << "Matriz h:\n" << h << std::endl;
   // std::cout << "Matriz H:\n" << H << std::endl;
+  // std::cout << "Matriz Q:\n" << Q << std::endl;
+  // std::cout << "Matriz R:\n" << R << std::endl;
 
   state_1 = f;
   P = F * P * F.transpose() + Q;
@@ -196,33 +221,34 @@ void Controlador::predictKalmanState(){
 void Controlador::velSubCB(const geometry_msgs::msg::Twist velSub){  
   u[0] = velSub.angular.z;
   u[1] = velSub.linear.x;
-
-  RCLCPP_INFO(this->get_logger(), "      vel recebida    ");
-  RCLCPP_INFO(this->get_logger(), "lin: %.4f     ang: %f", u[1], u[0]);
 }
 
 void Controlador::odomSubCB(const nav_msgs::msg::Odometry::SharedPtr odomSub)
+//[x_odom, y_odom, theta_odom, vel_odom, theta_imu, ax_imu, ay_imu, x_gps, y_gps]
 { 
-  //[x_odom, y_odom, theta_odom, vel_odom, theta_imu, ax_imu, ay_imu, x_gps, y_gps]
-    // x_odom = odomSub->pose.pose.position.x;
-    // y_odom = odomSub->pose.pose.position.y;
-    double y_orientation =  odomSub->pose.pose.orientation.y;
-    double x_orientation =  odomSub->pose.pose.orientation.x;
-    double z_orientation = odomSub->pose.pose.orientation.z;
-    double w_orientation = odomSub->pose.pose.orientation.w;
-    
-    double yaw = atan2(2 * (w_orientation * z_orientation + x_orientation * y_orientation), 1 - 2 * (y_orientation*y_orientation + z_orientation*z_orientation));
+    static rclcpp::Time time = this->get_clock()->now();
+    static double vel_lin_odom = 0;
+    static double old_measured_vel = 0;
+    static double w_odom = 0;
+    static double old_measured_w = 0;
+
+    rclcpp::Duration duration = this->get_clock()->now() - time;
+    double dt = duration.seconds();
 
     double vel_x_odom = odomSub->twist.twist.linear.x; 
     double vel_y_odom = odomSub->twist.twist.linear.x; 
+    double measured_vel = std::sqrt(vel_x_odom*vel_x_odom + vel_y_odom*vel_y_odom);
 
-    double vel_lin_odom = std::sqrt(vel_x_odom*vel_x_odom + vel_y_odom*vel_y_odom);
+    vel_lin_odom = lowPassFilter(dt, measured_vel, old_measured_vel, vel_lin_odom);// -a0 * vel_lin_odom + b0 * measured_vel + b1 * old_measured_vel;
+    
+    double measured_w = odomSub->twist.twist.angular.z;
+    w_odom = lowPassFilter(dt, measured_w, old_measured_w, w_odom);
 
-    Y(0) = odomSub->pose.pose.position.x;
-    Y(1) = odomSub->pose.pose.position.y;
-    Y(2) = yaw;
-    Y(3) = vel_lin_odom;
+    old_measured_w = measured_w;
+    old_measured_vel = measured_vel;
 
+    Y(0) = w_odom;
+    Y(1) = vel_lin_odom;
     // RCLCPP_INFO(this->get_logger(), "Odometria recebida");
     // RCLCPP_INFO(this->get_logger(), "--- Posição Atual do Robô (Odom) ---");
     // RCLCPP_INFO(this->get_logger(), "X:     %.4f metros", x);
@@ -237,20 +263,32 @@ void Controlador::odomSubCB(const nav_msgs::msg::Odometry::SharedPtr odomSub)
 
 void Controlador::imuSubCB(const sensor_msgs::msg::Imu::SharedPtr imuSub){
   //[x_odom, y_odom, theta_odom, vel_odom, theta_imu, ax_imu, ay_imu, x_gps, y_gps]
-  double z_orientation =  imuSub->orientation.z;
-  double w_orientation =  imuSub->orientation.w;
+  static rclcpp::Time time = this->get_clock()->now();
+  static double imu_w = 0;
+  static double old_measured_w = 0;
+  
+  rclcpp::Duration duration = this->get_clock()->now() - time;
+  double dt = duration.seconds();
+  
+  double measured_w = imuSub->angular_velocity.z;
+  
+  imu_w = lowPassFilter(dt, measured_w, old_measured_w, imu_w);
+  old_measured_w = measured_w;
+  
+  Y(2) = imu_w;
 
-  double y_orientation =  imuSub->orientation.y;
-  double x_orientation =  imuSub->orientation.x;
+  // double z_orientation =  imuSub->orientation.z;
+  // double w_orientation =  imuSub->orientation.w;
 
-  double yaw = atan2(2 * (w_orientation * z_orientation + x_orientation * y_orientation), 1 - 2 * (y_orientation*y_orientation + z_orientation*z_orientation));
-  double theta_imu = yaw + M_PI_2;
+  // double y_orientation =  imuSub->orientation.y;
+  // double x_orientation =  imuSub->orientation.x;
 
-  if (theta_imu > M_PI){
-    theta_imu -= 2*M_PI;
-  }
+  // double yaw = atan2(2 * (w_orientation * z_orientation + x_orientation * y_orientation), 1 - 2 * (y_orientation*y_orientation + z_orientation*z_orientation));
+  // double theta_imu = yaw + M_PI_2;
 
-  Y(4) = theta_imu;
+  // if (theta_imu > M_PI){
+  //   theta_imu -= 2*M_PI;
+  // }
 }
 
 void Controlador::satSubCB(const sensor_msgs::msg::NavSatFix::SharedPtr satSub){
@@ -285,8 +323,8 @@ void Controlador::satSubCB(const sensor_msgs::msg::NavSatFix::SharedPtr satSub){
     double x_gps = -(utm_x - origin_x_);
     double y_gps = utm_y - origin_y_;
 
-    Y(5) = x_gps;
-    Y(6) = y_gps;
+    Y(3) = x_gps;
+    Y(4) = y_gps;
 
     } catch (const std::exception& e) {
         RCLCPP_ERROR(this->get_logger(), "Erro na conversão: %s", e.what());

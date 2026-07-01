@@ -2,8 +2,8 @@ controlador: # Nome do seu nó no ROS 2
   ros__parameters:
     # Ruído do Processo (Diagonal da Matriz Q)
     # Como seu Q parece ser 3x3 com base nos índices 0, 1 e 2
-    process_noise_diagonal: [0.00000001, 0.01, 0.01]
+    process_noise_diagonal: [0.00001, 0.00001, 0.000000001, 0.000000001]
 
     # Ruído dos Sensores (Diagonal da Matriz R - 5 elementos)
     # Nota: Deixe o cálculo matemático já resolvido no YAML (0.014 * PI / 180 * sqrt(100) ≈ 0.002443)
-    measurement_noise_diagonal: [0.001, 0.0000001, 0.002443, 0.000015, 0.000015]
+    measurement_noise_diagonal: [0.00001, 0.00001, 0.000015, 0.000015]
